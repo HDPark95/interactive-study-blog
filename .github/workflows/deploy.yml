@@ -1,0 +1,112 @@
+name: Deploy to EC2
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:  # 수동 실행 가능
+
+env:
+  EC2_HOST: ${{ secrets.EC2_HOST }}
+  EC2_USER: ec2-user
+  DEPLOY_PATH: /home/ec2-user
+
+jobs:
+  # 변경된 파일 감지
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            backend:
+              - 'backend/**'
+            frontend:
+              - 'frontend/**'
+
+  # Backend 빌드 및 배포
+  deploy-backend:
+    needs: changes
+    if: needs.changes.outputs.backend == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup SSH Key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Deploy Backend
+        run: |
+          # 소스 코드 전송
+          rsync -avz --delete \
+            -e "ssh -i ~/.ssh/deploy_key" \
+            --exclude 'build' \
+            --exclude '.gradle' \
+            backend/ \
+            $EC2_USER@$EC2_HOST:$DEPLOY_PATH/backend/
+
+          # EC2에서 빌드 및 재시작
+          ssh -i ~/.ssh/deploy_key $EC2_USER@$EC2_HOST << 'EOF'
+            cd ~/backend
+            sudo docker build -t studyblog-backend:latest .
+            sudo docker tag studyblog-backend:latest studyblog-backend:test
+            cd ~/docker
+            sudo docker-compose -f docker-compose.full.yml up -d backend
+            echo "Backend deployed successfully!"
+          EOF
+
+  # Frontend 빌드 및 배포
+  deploy-frontend:
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup SSH Key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Deploy Frontend
+        run: |
+          # 소스 코드 전송
+          rsync -avz --delete \
+            -e "ssh -i ~/.ssh/deploy_key" \
+            --exclude 'node_modules' \
+            --exclude '.next' \
+            frontend/ \
+            $EC2_USER@$EC2_HOST:$DEPLOY_PATH/frontend/
+
+          # EC2에서 빌드 및 재시작
+          ssh -i ~/.ssh/deploy_key $EC2_USER@$EC2_HOST << 'EOF'
+            cd ~/frontend
+            sudo docker build -t studyblog-frontend:latest .
+            sudo docker tag studyblog-frontend:latest studyblog-frontend:test
+            cd ~/docker
+            sudo docker-compose -f docker-compose.full.yml up -d frontend
+            echo "Frontend deployed successfully!"
+          EOF
+
+  # 배포 완료 알림
+  notify:
+    needs: [deploy-backend, deploy-frontend]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deployment Summary
+        run: |
+          echo "## Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- Backend: ${{ needs.deploy-backend.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Frontend: ${{ needs.deploy-frontend.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Server: http://${{ secrets.EC2_HOST }}:3001" >> $GITHUB_STEP_SUMMARY
