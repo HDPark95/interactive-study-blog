@@ -1,0 +1,23 @@
+server:
+  port: 8082
+
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/studyblog
+    username: studyblog
+    password: studyblog
+    driver-class-name: org.postgresql.Driver
+
+  jpa:
+    hibernate:
+      ddl-auto: none
+    show-sql: false
+
+  data:
+    redis:
+      host: localhost
+      port: 6380
+
+logging:
+  level:
+    com.studyblog: DEBUG

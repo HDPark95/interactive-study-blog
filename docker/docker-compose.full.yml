@@ -1,0 +1,81 @@
+services:
+  postgresql:
+    image: postgis/postgis:16-3.4
+    platform: linux/amd64
+    container_name: studyblog-postgresql
+    environment:
+      POSTGRES_DB: studyblog
+      POSTGRES_USER: studyblog
+      POSTGRES_PASSWORD: studyblog
+    ports:
+      - "5434:5432"
+    volumes:
+      - postgresql_data:/var/lib/postgresql/data
+      - ./postgresql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U studyblog -d studyblog"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - studyblog-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: studyblog-redis
+    ports:
+      - "6381:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - studyblog-network
+
+  backend:
+    image: studyblog-backend:test
+    container_name: studyblog-backend
+    ports:
+      - "8082:8082"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgresql:5432/studyblog
+      SPRING_DATASOURCE_USERNAME: studyblog
+      SPRING_DATASOURCE_PASSWORD: studyblog
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: 6379
+    depends_on:
+      postgresql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8082/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+    networks:
+      - studyblog-network
+
+  frontend:
+    image: studyblog-frontend:test
+    container_name: studyblog-frontend
+    ports:
+      - "3001:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: http://backend:8082
+    depends_on:
+      - backend
+    networks:
+      - studyblog-network
+
+networks:
+  studyblog-network:
+    driver: bridge
+
+volumes:
+  postgresql_data:
+  redis_data:

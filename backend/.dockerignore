@@ -1,0 +1,33 @@
+# Gradle
+.gradle/
+build/
+!build/libs/*.jar
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Local config
+*.local
+.env
+.env.*
+
+# Test
+src/test/
+
+# Temp
+temp/
+tmp/
+*.tmp
+*.bak
