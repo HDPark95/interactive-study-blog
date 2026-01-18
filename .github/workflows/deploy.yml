@@ -3,7 +3,7 @@ name: Deploy to EC2
 on:
   push:
     branches: [main]
-  workflow_dispatch:  # 수동 실행 가능
+  workflow_dispatch:
 
 env:
   EC2_HOST: ${{ secrets.EC2_HOST }}
@@ -33,6 +33,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.backend == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -41,39 +42,71 @@ jobs:
           mkdir -p ~/.ssh
           echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
+          # SSH keyscan with timeout and retry
+          for i in 1 2 3; do
+            ssh-keyscan -T 10 -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts 2>/dev/null && break
+            echo "Retry $i..."
+            sleep 5
+          done
 
       - name: Deploy Backend
         run: |
-          SSH_OPTS="-o ServerAliveInterval=30 -o ServerAliveCountMax=10 -o StrictHostKeyChecking=no"
+          SSH_OPTS="-o ConnectTimeout=30 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=no"
+          SSH_CMD="ssh -i ~/.ssh/deploy_key $SSH_OPTS"
 
           # 소스 코드 전송
           rsync -avz --delete \
-            -e "ssh -i ~/.ssh/deploy_key $SSH_OPTS" \
+            -e "$SSH_CMD" \
             --exclude 'build' \
             --exclude '.gradle' \
             backend/ \
             $EC2_USER@$EC2_HOST:$DEPLOY_PATH/backend/
 
           # EC2에서 빌드 및 재시작
-          ssh -i ~/.ssh/deploy_key $SSH_OPTS $EC2_USER@$EC2_HOST << 'EOF'
+          $SSH_CMD $EC2_USER@$EC2_HOST << 'DEPLOY_SCRIPT'
+            set -e
+            echo "=== Building Backend ==="
             cd ~/backend
             sudo docker build -t studyblog-backend:latest .
             sudo docker tag studyblog-backend:latest studyblog-backend:test
+
+            echo "=== Starting Services ==="
             cd ~/docker
-            # DB가 없으면 먼저 시작
+
+            # DB 컨테이너 시작 (이미 실행 중이면 스킵)
             sudo docker-compose -f docker-compose.full.yml up -d postgresql redis
-            echo "Waiting for DB to be ready..."
-            sleep 30
+
+            # DB 준비 대기
+            echo "Waiting for DB..."
+            for i in {1..30}; do
+              if sudo docker-compose -f docker-compose.full.yml ps postgresql | grep -q "healthy"; then
+                echo "PostgreSQL is ready!"
+                break
+              fi
+              sleep 2
+            done
+
+            # Backend 시작
             sudo docker-compose -f docker-compose.full.yml up -d backend
-            echo "Backend deployed successfully!"
-          EOF
+
+            # Health check
+            echo "Checking backend health..."
+            sleep 10
+            if sudo docker ps | grep -q "studyblog-backend"; then
+              echo "Backend deployed successfully!"
+            else
+              echo "Backend container not running!"
+              sudo docker logs studyblog-backend --tail 50
+              exit 1
+            fi
+          DEPLOY_SCRIPT
 
   # Frontend 빌드 및 배포
   deploy-frontend:
     needs: changes
     if: needs.changes.outputs.frontend == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -82,34 +115,68 @@ jobs:
           mkdir -p ~/.ssh
           echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
+          # SSH keyscan with timeout and retry
+          for i in 1 2 3; do
+            ssh-keyscan -T 10 -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts 2>/dev/null && break
+            echo "Retry $i..."
+            sleep 5
+          done
 
       - name: Deploy Frontend
         run: |
-          SSH_OPTS="-o ServerAliveInterval=30 -o ServerAliveCountMax=10 -o StrictHostKeyChecking=no"
+          SSH_OPTS="-o ConnectTimeout=30 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=no"
+          SSH_CMD="ssh -i ~/.ssh/deploy_key $SSH_OPTS"
 
           # 소스 코드 전송
           rsync -avz --delete \
-            -e "ssh -i ~/.ssh/deploy_key $SSH_OPTS" \
+            -e "$SSH_CMD" \
             --exclude 'node_modules' \
             --exclude '.next' \
             frontend/ \
             $EC2_USER@$EC2_HOST:$DEPLOY_PATH/frontend/
 
           # EC2에서 빌드 및 재시작
-          ssh -i ~/.ssh/deploy_key $SSH_OPTS $EC2_USER@$EC2_HOST << 'EOF'
+          $SSH_CMD $EC2_USER@$EC2_HOST << 'DEPLOY_SCRIPT'
+            set -e
+            echo "=== Building Frontend ==="
             cd ~/frontend
             sudo docker build -t studyblog-frontend:latest .
             sudo docker tag studyblog-frontend:latest studyblog-frontend:test
+
+            echo "=== Starting Services ==="
             cd ~/docker
-            # DB와 backend가 없으면 먼저 시작
+
+            # 의존성 서비스 시작
             sudo docker-compose -f docker-compose.full.yml up -d postgresql redis
-            sleep 30
+
+            # DB 준비 대기
+            echo "Waiting for DB..."
+            for i in {1..30}; do
+              if sudo docker-compose -f docker-compose.full.yml ps postgresql | grep -q "healthy"; then
+                echo "PostgreSQL is ready!"
+                break
+              fi
+              sleep 2
+            done
+
+            # Backend 시작 (없으면)
             sudo docker-compose -f docker-compose.full.yml up -d backend
-            sleep 10
+            sleep 5
+
+            # Frontend 시작
             sudo docker-compose -f docker-compose.full.yml up -d frontend
-            echo "Frontend deployed successfully!"
-          EOF
+
+            # Health check
+            echo "Checking frontend health..."
+            sleep 10
+            if sudo docker ps | grep -q "studyblog-frontend"; then
+              echo "Frontend deployed successfully!"
+            else
+              echo "Frontend container not running!"
+              sudo docker logs studyblog-frontend --tail 50
+              exit 1
+            fi
+          DEPLOY_SCRIPT
 
   # 배포 완료 알림
   notify:
@@ -120,6 +187,10 @@ jobs:
       - name: Deployment Summary
         run: |
           echo "## Deployment Summary" >> $GITHUB_STEP_SUMMARY
-          echo "- Backend: ${{ needs.deploy-backend.result }}" >> $GITHUB_STEP_SUMMARY
-          echo "- Frontend: ${{ needs.deploy-frontend.result }}" >> $GITHUB_STEP_SUMMARY
-          echo "- Server: http://${{ secrets.EC2_HOST }}:3001" >> $GITHUB_STEP_SUMMARY
+          echo "| Service | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Backend | ${{ needs.deploy-backend.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Frontend | ${{ needs.deploy-frontend.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Website**: https://studyblog.hdevnews.net" >> $GITHUB_STEP_SUMMARY
+          echo "**API**: https://studyblog.hdevnews.net/api" >> $GITHUB_STEP_SUMMARY
